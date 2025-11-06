@@ -29,25 +29,28 @@ function toVariantGID(id) {
 // ---------- App ----------
 const app = express();
 app.use(express.json({ limit: '200kb' }));
+app.use(express.urlencoded({ extended: true })); // accepte POST <form>
 
-// --- CORS + privacy (doit être avant les routes) ---
+// --- CORS + privacy (avant TOUTES les routes) ---
 const ALLOWED_ORIGINS = [
   'https://merveillesparis.fr',
   'https://www.merveillesparis.fr',
+  // ajoute ici d'autres vitrines si besoin
 ];
 
 app.use((req, res, next) => {
   const origin = req.headers.origin || '';
+
   if (ALLOWED_ORIGINS.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Vary', 'Origin');
+    res.setHeader('Vary', 'Origin'); // évite les caches foireux
   }
+
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  // pour que le front puisse lire la Location sur la 302
-  res.setHeader('Access-Control-Expose-Headers', 'Location');
+  res.setHeader('Access-Control-Expose-Headers', 'Location'); // lire Location après 302
 
-  // privacy + pas de cache (utile pendant les tests)
+  // hygiène + pas de cache (utile en dev)
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Cache-Control', 'no-store');
@@ -120,7 +123,7 @@ async function createCheckout(shopKey, payload) {
     }
     return {
       quantity: Number(l?.quantity) || 1,
-      merchandiseId: toVariantGID(l?.id),                 // conversion auto → GID
+      merchandiseId: toVariantGID(l?.id), // conversion auto → GID
       sellingPlanId: l?.selling_plan ? String(l.selling_plan) : null,
       attributes: attrs,
     };
@@ -157,14 +160,20 @@ async function createCheckout(shopKey, payload) {
 // ---------- Endpoint principal ----------
 app.post('/bridge', async (req, res) => {
   try {
-    if (!Array.isArray(req.body?.lines) || !req.body.lines.length) {
+    // Supporte JSON direct OU <form> avec champ "payload"
+    const body = req.body && typeof req.body.payload === 'string'
+      ? JSON.parse(req.body.payload)
+      : req.body;
+
+    if (!Array.isArray(body?.lines) || !body.lines.length) {
       return res.status(400).json({ error: 'lines manquantes' });
     }
+
     const target = await pickTargetShop();
     if (!target) return res.status(503).json({ error: 'Aucun shop disponible' });
 
-    const checkoutUrl = await createCheckout(target, req.body);
-    return res.redirect(302, checkoutUrl); // côté B, le referrer = domaine du SaaS
+    const checkoutUrl = await createCheckout(target, body);
+    return res.redirect(302, checkoutUrl); // navigation (pas XHR) → pas de CORS
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Erreur interne' });
   }
