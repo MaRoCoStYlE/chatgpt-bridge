@@ -9,7 +9,9 @@ function loadMappingFromDisk() {
   try {
     const raw = fs.readFileSync('./mapping.json', 'utf8');
     const json = JSON.parse(raw);
-    if (typeof json !== 'object' || Array.isArray(json)) throw new Error('mapping.json doit être un objet {SKU: id}');
+    if (typeof json !== 'object' || Array.isArray(json)) {
+      throw new Error('mapping.json doit être un objet {SKU: id}');
+    }
     return json;
   } catch (e) {
     console.error('[mapping] mapping.json absent ou invalide:', e?.message);
@@ -28,17 +30,36 @@ function toVariantGID(id) {
 const app = express();
 app.use(express.json({ limit: '200kb' }));
 
-// Headers privacy AVANT les routes (sinon ça n’applique pas)
-app.use((_, res, next) => {
+// --- CORS + privacy (doit être avant les routes) ---
+const ALLOWED_ORIGINS = [
+  'https://merveillesparis.fr',
+  'https://www.merveillesparis.fr',
+];
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin || '';
+  if (ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  // pour que le front puisse lire la Location sur la 302
+  res.setHeader('Access-Control-Expose-Headers', 'Location');
+
+  // privacy + pas de cache (utile pendant les tests)
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Cache-Control', 'no-store');
+
+  if (req.method === 'OPTIONS') return res.sendStatus(204); // preflight
   next();
 });
+// --- fin CORS ---
 
-// Expose le mapping (lu depuis le fichier)
+// ---------- Routes utilitaires ----------
 app.get('/mapping.json', (_req, res) => res.json(MAPPING));
 
-// (Optionnel) Reload à chaud du mapping sans redeploy (protège-le plus tard si tu veux)
 app.post('/admin/reload-mapping', (_req, res) => {
   MAPPING = loadMappingFromDisk();
   res.json({ ok: true, count: Object.keys(MAPPING).length });
@@ -47,7 +68,7 @@ app.post('/admin/reload-mapping', (_req, res) => {
 // ---------- Config boutiques ----------
 const SHOPS = {
   B: { domain: process.env.SHOP_B_DOMAIN, sfApi: process.env.SHOP_B_STOREFRONT_TOKEN },
-  C: { domain: process.env.SHOP_C_DOMAIN || '', sfApi: process.env.SHOP_C_STOREFRONT_TOKEN || '' }
+  C: { domain: process.env.SHOP_C_DOMAIN || '', sfApi: process.env.SHOP_C_STOREFRONT_TOKEN || '' },
 };
 
 // ---------- Santé des shops ----------
@@ -59,9 +80,9 @@ async function healthCheck(shopKey) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Shopify-Storefront-Access-Token': s.sfApi
+        'X-Shopify-Storefront-Access-Token': s.sfApi,
       },
-      body: JSON.stringify({ query: `query { shop { name } }` })
+      body: JSON.stringify({ query: `query { shop { name } }` }),
     });
     return r.ok;
   } catch {
@@ -86,7 +107,6 @@ async function createCheckout(shopKey, payload) {
       }
     }`;
 
-  // Sécurise/simplifie le payload reçu du front A
   const lines = (payload?.lines || []).map(l => {
     const attrs = [];
     if (l?.properties && typeof l.properties === 'object') {
@@ -100,9 +120,9 @@ async function createCheckout(shopKey, payload) {
     }
     return {
       quantity: Number(l?.quantity) || 1,
-      merchandiseId: toVariantGID(l?.id),           // <= conversion auto vers GID
+      merchandiseId: toVariantGID(l?.id),                 // conversion auto → GID
       sellingPlanId: l?.selling_plan ? String(l.selling_plan) : null,
-      attributes: attrs
+      attributes: attrs,
     };
   });
 
@@ -118,12 +138,12 @@ async function createCheckout(shopKey, payload) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-Shopify-Storefront-Access-Token': s.sfApi
+      'X-Shopify-Storefront-Access-Token': s.sfApi,
     },
     body: JSON.stringify({
       query: mutation,
-      variables: { lines, attributes, note: payload?.note ? String(payload.note) : '' }
-    })
+      variables: { lines, attributes, note: payload?.note ? String(payload.note) : '' },
+    }),
   });
 
   const data = await r.json();
@@ -144,7 +164,7 @@ app.post('/bridge', async (req, res) => {
     if (!target) return res.status(503).json({ error: 'Aucun shop disponible' });
 
     const checkoutUrl = await createCheckout(target, req.body);
-    return res.redirect(302, checkoutUrl); // Referrer côté B = domaine du SaaS
+    return res.redirect(302, checkoutUrl); // côté B, le referrer = domaine du SaaS
   } catch (e) {
     return res.status(500).json({ error: e?.message || 'Erreur interne' });
   }
